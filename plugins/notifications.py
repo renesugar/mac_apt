@@ -26,8 +26,8 @@ __Plugin_Description = "Reads notification databases"
 __Plugin_Author = "Yogesh Khatri"
 __Plugin_Author_Email = "yogesh@swiftforensics.com"
 
-__Plugin_Standalone = True
-__Plugin_Standalone_Usage = '''This module parses the notification database for a user. 
+__Plugin_Modes = "MACOS,ARTIFACTONLY"
+__Plugin_ArtifactOnly_Usage = '''This module parses the notification database for a user. 
 
 For OSX Mavericks (and earlier), this is found at:
 /Users/<profile>/Library/Application Support/NotificationCenter/<UUID>.db
@@ -48,7 +48,7 @@ notifications = []
 data_info = [('User', DataType.TEXT),('Date', DataType.DATE),('Shown', DataType.INTEGER), \
             ('Bundle', DataType.TEXT),('AppPath', DataType.TEXT),('UUID', DataType.TEXT), \
             ('Title', DataType.TEXT),('SubTitle', DataType.TEXT),('Message', DataType.TEXT), \
-            ('SourceFilePath', DataType.TEXT)]
+            ('Source', DataType.TEXT)]
 
 def RemoveTabsNewLines(str):
     return str.replace("\t", " ").replace("\r", " ").replace("\n", "")

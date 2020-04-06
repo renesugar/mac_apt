@@ -26,9 +26,8 @@ __Plugin_Version = "1.0"
 __Plugin_Description = "Parses System Bluetooth Artifacts"
 __Plugin_Author = "Adam Ferrante, Yogesh Khatri"
 __Plugin_Author_Email = "adam@ferrante.io, yogesh@swiftforensics.com"
-
-__Plugin_Standalone = True
-__Plugin_Standalone_Usage = 'Provide the plist file located at /Library/Preferences/com.apple.Bluetooth.plist'
+__Plugin_Modes = "MACOS,ARTIFACTONLY"
+__Plugin_ArtifactOnly_Usage = 'Provide the plist file located at /Library/Preferences/com.apple.Bluetooth.plist'
 
 log = logging.getLogger('MAIN.' + __Plugin_Name) # Do not rename or remove this ! This is the logger object
 
@@ -150,7 +149,7 @@ def ParseClassOfDevice(cod_number):
                 minors.append('Scanner')
             if minor_number & (1 << 5):
                 minors.append('Printer')
-            if len(minors > 0):
+            if len(minors) > 0:
                 minors = ', '.join(minors)
 
         # wearable

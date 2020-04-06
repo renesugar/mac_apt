@@ -22,8 +22,8 @@ __Plugin_Description = "Reads file system event logs (from .fseventsd)"
 __Plugin_Author = "Yogesh Khatri"
 __Plugin_Author_Email = "yogesh@swiftforensics.com"
 
-__Plugin_Standalone = True
-__Plugin_Standalone_Usage = 'Provide the ".fseventsd" folder as input to process. This is '\
+__Plugin_Modes = "IOS,MACOS,ARTIFACTONLY"
+__Plugin_ArtifactOnly_Usage = 'Provide the ".fseventsd" folder as input to process. This is '\
                             'located at the root of any disk'
 
 log = logging.getLogger('MAIN.' + __Plugin_Name) # Do not rename or remove this ! This is the logger object
@@ -233,14 +233,16 @@ def ReadUuid(f):
         log.exception('Error trying to read UUID')
     return uuid
 
-def Plugin_Start(mac_info):
-    '''Main Entry point function for plugin'''
-    logs = []
-
-    file_list = mac_info.ListItemsInFolder('/.fseventsd', EntryType.FILES, True)
+def ProcessFsevents(logs, folder_path, file_list, mac_info):
+    ''' Process Fsevents from files
+        Args:
+            logs - list to be populated
+            file_list - list returned from mac_info.ListItemsInFolder
+            mac_info - MacInfo object
+    '''
     for item in file_list:
         file_name = item['name']
-        path = '/.fseventsd/' + file_name
+        path = folder_path + '/' + file_name
         mac_info.ExportFile(path, __Plugin_Name, '', False)
         f = mac_info.OpenSmallFile(path)
         if f != None:
@@ -251,6 +253,20 @@ def Plugin_Start(mac_info):
                 ProcessFile(file_name, f, logs, item['dates']['m_time'], path)
         else:
             log.error('Could not open file {}'.format(path))
+
+def Plugin_Start(mac_info):
+    '''Main Entry point function for plugin'''
+    logs = []
+
+    file_list = mac_info.ListItemsInFolder('/.fseventsd', EntryType.FILES, True)
+    ProcessFsevents(logs, '/.fseventsd', file_list, mac_info)
+
+    if hasattr(mac_info, 'BuildFullPath'): # its a MOUNTED or live image
+        os_ver = mac_info.GetVersionDictionary()
+        if os_ver['major'] == 10 and os_ver['minor'] >= 15:
+            # Then also get DATA volume's FSEVENTS from /System/Volumes/Data
+            file_list = mac_info.ListItemsInFolder('/System/Volumes/Data/.fseventsd', EntryType.FILES, True)
+            ProcessFsevents(logs, '/System/Volumes/Data/.fseventsd', file_list, mac_info)
     
     if len(logs) > 0:
         PrintAll(logs, mac_info.output_params)
@@ -280,6 +296,21 @@ def Plugin_Start_Standalone(input_files_list, output_params):
                      " (metadata not data)! This may have changed if you are not on a live or read-only image.")
         else:
             log.info('No fsevents found')
+
+def Plugin_Start_Ios(ios_info):
+    '''Entry point for ios_apt plugin'''
+    logs = []
+
+    file_list = ios_info.ListItemsInFolder('/.fseventsd', EntryType.FILES, True)
+    ProcessFsevents(logs, '/.fseventsd', file_list, ios_info)
+
+    file_list = ios_info.ListItemsInFolder('/private/var/.fseventsd', EntryType.FILES, True)
+    ProcessFsevents(logs, '/private/var/.fseventsd', file_list, ios_info)
+
+    if len(logs) > 0:
+        PrintAll(logs, ios_info.output_params)
+    else:
+        log.info('No fsevents found')
 
 if __name__ == '__main__':
     print ("This plugin is a part of a framework and does not run independently on its own!")

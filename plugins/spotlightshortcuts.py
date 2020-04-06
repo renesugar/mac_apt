@@ -24,8 +24,8 @@ __Plugin_Description = "Gets user typed data in the spotlight bar, used to launc
 __Plugin_Author = "Yogesh Khatri"
 __Plugin_Author_Email = "yogesh@swiftforensics.com"
 
-__Plugin_Standalone = True
-__Plugin_Standalone_Usage = 'This module parses user searched data using the spotlight bar. Data is retreived from the plist file(s) found at: /Users/<User>/Library/Preferences/com.apple.spotlight.plist and /Users/<User>/Library/Application Support/com.apple.spotlight.Shortcuts'
+__Plugin_Modes = "MACOS,ARTIFACTONLY"
+__Plugin_ArtifactOnly_Usage = 'This module parses user searched data using the spotlight bar. Data is retreived from the plist file(s) found at: /Users/<User>/Library/Preferences/com.apple.spotlight.plist and /Users/<User>/Library/Application Support/com.apple.spotlight.Shortcuts'
 
 log = logging.getLogger('MAIN.' + __Plugin_Name) # Do not rename or remove this ! This is the logger object
 
@@ -77,8 +77,12 @@ def Plugin_Start(mac_info):
     shortcuts = []
     user_plist_rel_path = '{}/Library/Preferences/com.apple.spotlight.plist' # Mavericks (10.9) or older
     version = mac_info.GetVersionDictionary()
-    if version['major'] == 10 and version['minor'] >= 10:
-        user_plist_rel_path = '{}/Library/Application Support/com.apple.spotlight.Shortcuts'
+    if version['major'] == 10:
+        if version['minor'] >= 10 and version['minor'] < 15:
+            user_plist_rel_path = '{}/Library/Application Support/com.apple.spotlight.Shortcuts'
+        elif version['minor'] >= 15:
+            user_plist_rel_path = '{}/Library/Application Support/com.apple.spotlight/com.apple.spotlight.Shortcuts'
+    
     processed_paths = set()
     for user in mac_info.users:
         user_name = user.user_name

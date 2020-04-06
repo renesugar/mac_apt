@@ -235,7 +235,7 @@ class Apfs(KaitaiStruct):
             self.created_by = (KaitaiStream.bytes_terminate(self._io.read_bytes(32), 0, False)).decode("UTF-8")
             self.time_created = self._io.read_s8le()
             self.unknown_312 = self._io.read_bytes(392)
-            self.volume_name = self._io.read_bytes(256).decode("UTF-8").rstrip('\0')
+            self.volume_name = (KaitaiStream.bytes_terminate(self._io.read_bytes(256), 0, False)).decode("UTF-8")
             self.next_doc_id = self._io.read_u4le()
             self.apfs_role = self._io.read_u2le() #self._root.VolumeRoleType(self._io.read_u2le())
             self.reserved = self._io.read_u2le()
@@ -486,7 +486,16 @@ class Apfs(KaitaiStruct):
             self.blocked_out_block_count = self._io.read_u8le()
             self.evict_mapping_tree_oid = self._io.read_u8le()
             self.flags = self._io.read_u8le()
-
+            self.efi_jumpstart = self._io.read_u8le()
+            self.fusion_uuid = self._io.read_bytes(16)
+            self.keylocker_paddr = self._io.read_u8le()
+            self.keylocker_block_count = self._io.read_s8le()
+            self.ephemeral_info = self._io.read_u8le() * 4
+            self.test_oid = self._io.read_u8le()
+            self.fusion_mt_oid = self._io.read_u8le()
+            self.fusion_wbc_oid = self._io.read_u8le()
+            self.fusion_wbc_paddr = self._io.read_u8le()
+            self.fusion_wbc_count = self._io.read_u8le()
 
     class DrecHashedRecord(KaitaiStruct):
         __slots__ = ['_io', '_parent', '_root', 'node_id', 'date_added', 'type_item', 'xfields']

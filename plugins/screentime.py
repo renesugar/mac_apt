@@ -14,15 +14,15 @@ import os
 import sqlite3
 import logging
 
-__Plugin_Name = "SCREENTIME" # Cannot have spaces, and must be all caps!
+__Plugin_Name = "SCREENTIME"
 __Plugin_Friendly_Name = "Screen Time Data"
 __Plugin_Version = "1.0"
 __Plugin_Description = "Parses application Screen Time data"
 __Plugin_Author = "Jack Farley"
 __Plugin_Author_Email = "jfarley248@gmail.com"
 
-__Plugin_Standalone = True
-__Plugin_Standalone_Usage = 'Provide Screen Time database found at:' \
+__Plugin_Modes = "IOS,MACOS,ARTIFACTONLY"
+__Plugin_ArtifactOnly_Usage = 'Provide Screen Time database found at:' \
                             '/private/var/folders/XX/XXXXXXXXXXXXXXXXXXX_XXXXXXXXX/0/com.apple.ScreenTimeAgent/Store/'
 
 log = logging.getLogger('MAIN.' + __Plugin_Name) # Do not rename or remove this ! This is the logger object
@@ -65,7 +65,6 @@ def PrintAll(screen_time_data, output_params, source_path):
         screen_time_list.append(sc_items)
     WriteList("ScreenTime Info", "ScreenTime", screen_time_list, screen_time_info, output_params, source_path)
 
-
 def OpenDbFromImage(mac_info, inputPath):
     '''Returns tuple of (connection, wrapper_obj)'''
     try:
@@ -87,25 +86,19 @@ def OpenDb(inputPath):
         log.exception ("Failed to open database, is it a valid Screen Time DB?")
     return None
 
-
 def findDb(mac_info):
     db_path_arr = []
     for user in mac_info.users:
         if not user.DARWIN_USER_DIR or not user.user_name:
             continue  # TODO: revisit this later!
         else:
-
             darwin_user_folders = user.DARWIN_USER_DIR.split(',')
-
             for darwin_user_dir in darwin_user_folders:
                 db_path = (darwin_user_dir + '/com.apple.ScreenTimeAgent/Store/RMAdminStore-Local.sqlite')
                 if not mac_info.IsValidFilePath(db_path): continue
                 else:
                     db_path_arr.append(db_path)
-
     return db_path_arr
-
-
 
 def ReadScreenTime(db, screen_time_arr, source):
     try:
@@ -128,9 +121,6 @@ def ReadScreenTime(db, screen_time_arr, source):
         "LEFT JOIN ZCOREUSER as zcu on zcu.Z_PK = zu.ZUSER " \
         "LEFT JOIN ZUSAGECOUNTEDITEM as zuci on zuci.ZBLOCK = zuc.ZBLOCK AND zuci.ZBUNDLEIDENTIFIER = zut.ZBUNDLEIDENTIFIER " \
         "ORDER BY zub.ZSTARTDATE;"
-
-
-
 
         db.row_factory = sqlite3.Row
         cursor = db.execute(query)
@@ -164,7 +154,6 @@ def ProcessSCDbFromPath(mac_info, screen_time_arr, source_path):
         ReadScreenTime(db, screen_time_arr, source_path)
         db.close()
 
-
 def Plugin_Start(mac_info):
     '''Main Entry point function for plugin'''
     path_to_screentime_db = findDb(mac_info)
@@ -192,6 +181,22 @@ def Plugin_Start_Standalone(input_files_list, output_params):
             PrintAll(screen_time_arr, output_params, '')
         else:
             log.info("No Screen Time artifacts found.")
+
+def Plugin_Start_Ios(ios_info):
+    '''Entry point for ios_apt plugin'''
+    paths_to_screentime_db = ["/private/var/mobile/Library/Application Support/com.apple.remotemanagementd/RMAdminStore-Local.sqlite",
+                              "/private/var/mobile/Library/Application Support/com.apple.remotemanagementd/RMAdminStore-Cloud.sqlite"]
+    screen_time_arr = []
+
+    for screentime_path in paths_to_screentime_db:
+        if ios_info.IsValidFilePath(screentime_path):
+            ProcessSCDbFromPath(ios_info, screen_time_arr, screentime_path)
+
+    if screen_time_arr:
+        log.info("Screen Time data found!")
+        PrintAll(screen_time_arr, ios_info.output_params, '')
+    else:
+        log.info("No Screen Time artifacts found.")
 
 if __name__ == '__main__':
     print ("This plugin is a part of a framework and does not run independently on its own!")

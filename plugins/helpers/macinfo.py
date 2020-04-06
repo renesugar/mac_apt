@@ -22,10 +22,15 @@ import sys
 import tempfile
 import time
 import traceback
+from io import BytesIO
 from plugins.helpers.apfs_reader import *
+from plugins.helpers.deserializer import process_nsa_plist
 from plugins.helpers.hfs_alt import HFSVolume
 from plugins.helpers.common import *
 from plugins.helpers.structs import *
+
+if sys.platform == 'linux':
+    from plugins.helpers.statx import statx
 
 log = logging.getLogger('MAIN.HELPERS.MACINFO')
 
@@ -41,6 +46,7 @@ class OutputParams:
         self.xlsx_writer = None
         self.output_db_path = ''
         self.export_path = '' # For artifact source files
+        self.export_path_rel = '' # Relative export path
         self.export_log_csv = None
         self.timezone = TimeZoneType.UTC
 
@@ -308,18 +314,64 @@ class MacInfo:
         #self.Partitions = {}   # Dictionary of all partition objects returned from pytsk LATER! 
         self.pytsk_image = None
         self.macos_FS = None      # Just the FileSystem object (fs) from OSX partition
-        self.osx_partition_start_offset = 0 # Container offset if APFS
+        self.macos_partition_start_offset = 0 # Container offset if APFS
         self.vol_info = None # disk_volumes
         self.output_params = output_params
-        self.macos_version = '0.0.0'
-        self.osx_build = ''
-        self.osx_friendly_name = 'No name yet!'
+        self.os_version = '0.0.0'
+        self.os_build = ''
+        self.os_friendly_name = 'No name yet!'
         self.users = []
         self.hfs_native = NativeHfsParser()
         self.is_apfs = False
         self.use_native_hfs_parser = True
+        # runtime platform 
+        self.is_windows = (os.name == 'nt')
+        self.is_linux = (sys.platform == 'linux')
 
     # Public functions, plugins can use these
+    def GetAbsolutePath(self, current_abs_path, dest_rel_path):
+        '''Returns the absolute (full) path to a destination file/folder given the
+            current location (path) and a relative path to the destination. This is
+            for relative paths that start with . or ..  '''
+        # This is for linux paths only
+        if dest_rel_path in ('', '/'): 
+            return current_abs_path
+        # Strip / at start and end of dest
+        dest_rel_path = dest_rel_path.rstrip('/').lstrip('/')
+
+        if current_abs_path[-1] != '/':
+            current_abs_path += '/'
+        
+        curr_paths = current_abs_path.rstrip('/').lstrip('/').split('/')
+        if len(curr_paths) == 1 and curr_paths[0] == '':
+            curr_paths = []
+        rel_paths = dest_rel_path.split('/')
+
+        curr_path_index = len(curr_paths)
+        for x in rel_paths:
+            if x == '.':
+                pass
+            elif x == '..':
+                if curr_path_index == 0:
+                    raise ValueError('Relative path tried to go above root !')
+                else:
+                    curr_path_index -= 1
+                    curr_paths.pop()
+            elif x == '':
+                raise ValueError("Relative path had // , can't parse")
+            else:
+                curr_paths.append(x)
+                curr_path_index += 1
+
+        final_path = ''
+        for index, x in enumerate(curr_paths):
+            final_path += '/' + x
+            if index == curr_path_index:
+                break
+        if final_path == '':
+            final_path = '/'
+        return final_path
+
     def GetFileMACTimes(self, file_path):
         '''
            Returns dictionary {c_time, m_time, cr_time, a_time} 
@@ -394,8 +446,8 @@ class MacInfo:
            If 'overwrite' is set to True, it will not check for existing files. The
            default behaviour is to check and rename the newly exported file if there
            is a name collision.
-           If this is an sqlite db, the -shm and -wal files will also be exported.
-           The check for -shm and -wal can be skipped if  check_for_sqlite_files=False
+           If this is an sqlite db, the -journal and -wal files will also be exported.
+           The check for -journal and -wal can be skipped if  check_for_sqlite_files=False
            It is much faster to skip the check if not needed.
            The Function returns False if it fails to export the file.
         '''
@@ -416,13 +468,13 @@ class MacInfo:
             file_path = os.path.join(export_path, out_filename)
         else:
             file_path = CommonFunctions.GetNextAvailableFileName(os.path.join(export_path, out_filename))
-        shm_file_path = file_path + "-shm" # For sqlite db
-        wal_file_path = file_path + "-wal" # For sqlite db
 
         if self._ExtractFile(artifact_path, file_path):
             if check_for_sqlite_files:
-                if self.IsValidFilePath(artifact_path + "-shm"):
-                    self._ExtractFile(artifact_path + "-shm", shm_file_path)
+                jrn_file_path = file_path + "-journal"
+                wal_file_path = file_path + "-wal"
+                if self.IsValidFilePath(artifact_path + "-journal"):
+                    self._ExtractFile(artifact_path + "-journal", jrn_file_path)
                 if self.IsValidFilePath(artifact_path + "-wal"):
                     self._ExtractFile(artifact_path + "-wal", wal_file_path)
             return True
@@ -433,13 +485,21 @@ class MacInfo:
         if self.ExtractFile(artifact_path, export_path):
             if not mac_times:
                 mac_times = self.GetFileMACTimes(artifact_path)
-            self.output_params.export_log_csv.WriteRow([artifact_path, export_path, mac_times['c_time'], mac_times['m_time'], mac_times['cr_time'], mac_times['a_time']])
+            export_path_rel = os.path.relpath(export_path, start=self.output_params.export_path)
+            if self.is_windows:
+                export_path_rel = export_path_rel.replace('\\', '/')
+            self.output_params.export_log_csv.WriteRow([artifact_path, export_path_rel, mac_times['c_time'], mac_times['m_time'], mac_times['cr_time'], mac_times['a_time']])
             return True
         else:
             log.info("Failed to export '" + artifact_path + "' to '" + export_path + "'")
         return False
 
-    def ReadPlist(self, path):
+    def DeserializeNsKeyedPlist(self, plist_file):
+        '''Returns a deserialized version of an NSKeyedArchive plist'''
+        deserialised_plist = process_nsa_plist('', plist_file)
+        return deserialised_plist
+
+    def ReadPlist(self, path, deserialize=False):
         '''Safely open and read a plist; returns tuple (True/False, plist/None, "error_message")'''
         log.debug("Trying to open plist file : " + path)
         error = ''
@@ -449,16 +509,38 @@ class MacInfo:
                 try:
                     log.debug("Trying to read plist file : " + path)
                     plist = biplist.readPlist(f)
-                    return (True, plist, '')
+                    if deserialize:
+                        try:
+                            f.seek(0)
+                            plist = self.DeserializeNsKeyedPlist(f)
+                            f.close()
+                            return (True, plist, '')
+                        except:
+                            f.close()
+                            error = 'Could not read deserialized plist: ' + path + " Error was : " + str(ex)  
+                    else:
+                        f.close()
+                        return (True, plist, '')
                 except biplist.InvalidPlistException as ex:
                     try:
                         # Perhaps this is manually edited or incorrectly formatted by a non-Apple utility  
                         # that has left whitespaces at the start of file before <?xml tag
+                        # This is assuming XML format!
                         f.seek(0)
                         data = f.read().decode('utf8')
+                        f.close()
                         data = data.lstrip(" \r\n\t").encode('utf8', 'backslashreplace')
-                        plist = biplist.readPlistFromString(data)
-                        return (True, plist, '')
+                        if deserialize:
+                            try:
+                                temp_file = BytesIO(data)
+                                plist = self.DeserializeNsKeyedPlist(temp_file)
+                                temp_file.close()
+                                return (True, plist, '')
+                            except:
+                                error = 'Could not read deserialized plist: ' + path + " Error was : " + str(ex)
+                        else:
+                            plist = biplist.readPlistFromString(data)                        
+                            return (True, plist, '')
                     except biplist.InvalidPlistException as ex:
                         error = 'Could not read plist: ' + path + " Error was : " + str(ex)
                 except IOError as ex:
@@ -586,7 +668,7 @@ class MacInfo:
                 log.debug("Trying to open with Native HFS parser")
                 try:
                     if not self.hfs_native.initialized:
-                        self.hfs_native.Initialize(self.pytsk_image, self.osx_partition_start_offset)
+                        self.hfs_native.Initialize(self.pytsk_image, self.macos_partition_start_offset)
                     return self.hfs_native.OpenSmallFile(path)
                 except (IOError, OSError, ValueError):
                     log.error("Failed to open file: " + path)
@@ -624,7 +706,7 @@ class MacInfo:
                                     f.close()
                                     os.remove(destination_path)
                                     if not self.hfs_native.initialized:
-                                        self.hfs_native.Initialize(self.pytsk_image, self.osx_partition_start_offset)
+                                        self.hfs_native.Initialize(self.pytsk_image, self.macos_partition_start_offset)
                                     return self.hfs_native.ExtractFile(tsk_path,destination_path)
                                 except Exception as ex2:
                                     log.error("Failed to export file: " + tsk_path)
@@ -658,7 +740,7 @@ class MacInfo:
     def GetVersionDictionary(self):
         '''Returns macOS version as dictionary {major:10, minor:5 , micro:0}'''
         version_dict = { 'major':0, 'minor':0, 'micro':0 }
-        info = self.macos_version.split(".")
+        info = self.os_version.split(".")
         try:
             version_dict['major'] = int(info[0])
             try:
@@ -835,8 +917,8 @@ class MacInfo:
                                 target_user.real_name = self.GetArrayFirstElement(plist.get('realname', ''))
                                 target_user.pw_hint = self.GetArrayFirstElement(plist.get('hint', ''))
                                 target_user._source = user_plist_path
-                                macos_version = self.GetVersionDictionary()
-                                if macos_version['major'] == 10 and macos_version['minor'] <= 9: # Mavericks & earlier
+                                os_version = self.GetVersionDictionary()
+                                if os_version['major'] == 10 and os_version['minor'] <= 9: # Mavericks & earlier
                                     password_policy_data = plist.get('passwordpolicyoptions', None)
                                     if password_policy_data == None:
                                         log.debug('Could not find passwordpolicyoptions for user {}'.format(target_user.user_name))
@@ -898,27 +980,27 @@ class MacInfo:
             if f != None:
                 try:
                     plist = biplist.readPlist(f)
-                    self.macos_version = plist.get('ProductVersion', '')
-                    self.osx_build = plist.get('ProductBuildVersion', '')
-                    if self.macos_version != '':
-                        if   self.macos_version.startswith('10.10'): self.osx_friendly_name = 'Yosemite'
-                        elif self.macos_version.startswith('10.11'): self.osx_friendly_name = 'El Capitan'
-                        elif self.macos_version.startswith('10.12'): self.osx_friendly_name = 'Sierra'
-                        elif self.macos_version.startswith('10.13'): self.osx_friendly_name = 'High Sierra'
-                        elif self.macos_version.startswith('10.14'): self.osx_friendly_name = 'Mojave'
-                        elif self.macos_version.startswith('10.15'): self.osx_friendly_name = 'Catalina'
-                        elif self.macos_version.startswith('10.0'): self.osx_friendly_name = 'Cheetah'
-                        elif self.macos_version.startswith('10.1'): self.osx_friendly_name = 'Puma'
-                        elif self.macos_version.startswith('10.2'): self.osx_friendly_name = 'Jaguar'
-                        elif self.macos_version.startswith('10.3'): self.osx_friendly_name = 'Panther'
-                        elif self.macos_version.startswith('10.4'): self.osx_friendly_name = 'Tiger'
-                        elif self.macos_version.startswith('10.5'): self.osx_friendly_name = 'Leopard'
-                        elif self.macos_version.startswith('10.6'): self.osx_friendly_name = 'Snow Leopard'
-                        elif self.macos_version.startswith('10.7'): self.osx_friendly_name = 'Lion'
-                        elif self.macos_version.startswith('10.8'): self.osx_friendly_name = 'Mountain Lion'
-                        elif self.macos_version.startswith('10.9'): self.osx_friendly_name = 'Mavericks'
-                        else: self.osx_friendly_name = 'Unknown version!'
-                    log.info ('OSX version detected is: {} ({}) Build={}'.format(self.osx_friendly_name, self.macos_version, self.osx_build))
+                    self.os_version = plist.get('ProductVersion', '')
+                    self.os_build = plist.get('ProductBuildVersion', '')
+                    if self.os_version != '':
+                        if   self.os_version.startswith('10.10'): self.os_friendly_name = 'Yosemite'
+                        elif self.os_version.startswith('10.11'): self.os_friendly_name = 'El Capitan'
+                        elif self.os_version.startswith('10.12'): self.os_friendly_name = 'Sierra'
+                        elif self.os_version.startswith('10.13'): self.os_friendly_name = 'High Sierra'
+                        elif self.os_version.startswith('10.14'): self.os_friendly_name = 'Mojave'
+                        elif self.os_version.startswith('10.15'): self.os_friendly_name = 'Catalina'
+                        elif self.os_version.startswith('10.0'): self.os_friendly_name = 'Cheetah'
+                        elif self.os_version.startswith('10.1'): self.os_friendly_name = 'Puma'
+                        elif self.os_version.startswith('10.2'): self.os_friendly_name = 'Jaguar'
+                        elif self.os_version.startswith('10.3'): self.os_friendly_name = 'Panther'
+                        elif self.os_version.startswith('10.4'): self.os_friendly_name = 'Tiger'
+                        elif self.os_version.startswith('10.5'): self.os_friendly_name = 'Leopard'
+                        elif self.os_version.startswith('10.6'): self.os_friendly_name = 'Snow Leopard'
+                        elif self.os_version.startswith('10.7'): self.os_friendly_name = 'Lion'
+                        elif self.os_version.startswith('10.8'): self.os_friendly_name = 'Mountain Lion'
+                        elif self.os_version.startswith('10.9'): self.os_friendly_name = 'Mavericks'
+                        else: self.os_friendly_name = 'Unknown version!'
+                    log.info ('macOS version detected is: {} ({}) Build={}'.format(self.os_friendly_name, self.os_version, self.os_build))
                     return True
                 except (InvalidPlistException, NotBinaryPlistException) as ex:
                     log.error ("Could not get ProductVersion from plist. Is it a valid xml plist? Error=" + str(ex))
@@ -953,8 +1035,20 @@ class ApfsMacInfo(MacInfo):
 
     def ReadApfsVolumes(self):
         '''Read volume information into an sqlite db'''
+        # Process Preboot volume first
+        preboot_vol = self.apfs_container.preboot_volume
+        if preboot_vol:
+            apfs_parser = ApfsFileSystemParser(preboot_vol, self.apfs_db)
+            apfs_parser.read_volume_records()
+            preboot_vol.dbo = self.apfs_db
+        # Process other volumes now
         for vol in self.apfs_container.volumes:
-            if vol.is_encrypted: 
+            vol.dbo = self.apfs_db
+            if vol == preboot_vol:
+                continue
+            elif vol.is_encrypted:
+                # x = preboot_vol.ListItemsInFolder('/')
+                # log.debug(str(x))
                 continue
             apfs_parser = ApfsFileSystemParser(vol, self.apfs_db)
             apfs_parser.read_volume_records()
@@ -1076,13 +1170,11 @@ class ApfsMacInfo(MacInfo):
 class MountedMacInfo(MacInfo):
     def __init__(self, root_folder_path, output_params):
         MacInfo.__init__(self, output_params)
-        self.osx_root_folder = root_folder_path
-        # TODO: if os.name == 'nt' and len (root_folder_path) == 2 and root_folder_path[2] == ':': self.osx_root_folder += '\\'
-        self.is_windows = (os.name == 'nt')
-        self.is_linux = (sys.platform == 'linux')
+        self.macos_root_folder = root_folder_path
+        # TODO: if os.name == 'nt' and len (root_folder_path) == 2 and root_folder_path[2] == ':': self.macos_root_folder += '\\'
         if self.is_linux:
             log.warning('Since this is a linux (mounted) system, there is no way for python to extract created_date timestamps. '\
-                        'This is a limitation of Python. Created timestamps shows/seen will actually be same as Last_Modified timestamps.')
+                        'This is a limitation of Python. Created timestamps shown/seen will actually be same as Last_Modified timestamps.')
 
     def BuildFullPath(self, path_in_image):
         '''
@@ -1097,7 +1189,7 @@ class MountedMacInfo(MacInfo):
         if self.is_windows:
             path = path.replace('/', '\\')
         try:
-            full_path = os.path.join(self.osx_root_folder, path)
+            full_path = os.path.join(self.macos_root_folder, path)
         except Exception:
             log.error("Exception in BuildFullPath(), path was " + path_in_image)
             log.exception("Exception details")
@@ -1108,9 +1200,16 @@ class MountedMacInfo(MacInfo):
         if self.is_windows:
             CommonFunctions.ReadUnixTime(os.path.getctime(local_path))
         elif self.is_linux:
-            return os.path.getmtime(local_path) # Since this is not possible to fetch in Linux (using python)!
+            try:
+                t = statx(local_path).get_btime() # New Linux kernel 4+ has this ability
+            except (OSError, ValueError) as ex:
+                t = 0 # Old linux kernel that does not support statx
+            if t != 0:
+                return CommonFunctions.ReadUnixTime(t)
+            else: # Either old linux or a version of FUSE that does not populates btime (current does not)!
+                return CommonFunctions.ReadUnixTime(os.path.getmtime(local_path)) # Since this is not possible to fetch in Linux (using python)!
         else:
-            return os.stat(local_path).st_birthtime
+            return CommonFunctions.ReadUnixTime(os.stat(local_path).st_birthtime)
 
     def GetFileMACTimes(self, file_path):
         file_path = self.BuildFullPath(file_path)
@@ -1380,6 +1479,133 @@ class MountedMacInfo(MacInfo):
                     log.error ("Could not open plist " + plist_meta['name'] + " Exception: " + str(ex))
         #TODO: Domain user uid, gid?
 
+class MountedMacInfoSeperateSysData(MountedMacInfo):
+    '''Same as MountedMacInfo, but takes into account two volumes (SYS, DATA) mounted separately'''
+
+    def __init__(self, sys_root_folder_path, data_root_folder_path, output_params):
+        MountedMacInfo.__init__(self, sys_root_folder_path, output_params)
+        self.sys_volume_folder = sys_root_folder_path  # New in 10.15, a System read-only partition
+        self.data_volume_folder = data_root_folder_path # New in 10.15, a separate Data partition
+        self.firmlinks = {}
+        self.firmlinks_paths =[]
+        self.max_firmlink_depth = 0
+        self._ParseFirmlinks()
+
+    def _ParseFirmlinks(self):
+        '''Read the firmlink path mappings between System & Data volumes'''
+        firmlink_file_path = '/usr/share/firmlinks'
+        try:
+            mounted_path = super().BuildFullPath(firmlink_file_path)
+            log.debug("Trying to open file : " + mounted_path)
+            f = open(mounted_path, 'rb')
+        except (IOError, OSError) as ex:
+            log.exception("Error opening file : " + mounted_path)
+            raise ValueError('Fatal : Could not find/read Firmlinks file in System volume!')
+
+        data = [x.decode('utf8') for x in f.read().split(b'\n')]
+        for item in data:
+            if item:
+                source, dest = item.split('\t')
+                self.firmlinks[source] = dest
+                self.firmlinks_paths.append(source)
+                depth = len(source[1:].split('/'))
+                if depth > self.max_firmlink_depth: self.max_firmlink_depth = depth
+                if source[1:] != dest:
+                    # Maybe this is the Beta version of Catalina, try prefix 'Device'
+                    if dest.startswith('Device/'):
+                        self.firmlinks[source] = dest[7:]
+                    else:
+                        log.warning("Firmlink not handled : Source='{}' Dest='{}'".format(source, dest))
+        #add one for /System/Volumes/Data  /
+        self.firmlinks['/System/Volumes/Data'] = ''
+        self.firmlinks_paths.append('/System/Volumes/Data')
+        f.close()
+
+    def BuildFullPath(self, path_in_image):
+        '''
+        Takes path inside image as input and returns the full path on current volume
+        Eg: Image mounted at D:\Images\mac_osx\  Path=\etc\hosts  Return= D:\Images\mac_osx\etc\hosts
+        Takes into account firmlinks and accordingly switches to SYS or DATA volume.
+        '''
+        if path_in_image == '/': return self.sys_volume_folder
+
+        if path_in_image[-1] == '/': path_in_image = path_in_image[:-1] # remove trailing /
+        
+        path_parts = path_in_image[1:].split('/')
+        path = ''
+        vol_folder = self.sys_volume_folder
+        for index, folder_name in enumerate(path_parts):
+            log.debug("index={}, folder_name={}".format(index, folder_name))
+            if index >= self.max_firmlink_depth: 
+                break
+            else:
+                log.debug("Searched for {}".format('/' + '/'.join(path_parts[:index + 1])))
+                dest = self.firmlinks.get('/' + '/'.join(path_parts[:index + 1]), None)
+                if dest != None:
+                    log.debug("FOUND**********")
+                    found_in_firmlink = True
+                    vol_folder = self.data_volume_folder
+                    path = dest
+                    if index + 1 < len(path_parts):
+                        rest_of_path = '/'.join(path_parts[index + 1:])
+                        path += '/' + rest_of_path
+                    elif path == '':
+                        path = '/'
+
+        full_path = ''
+        if path == '': path = path_in_image
+        if path.startswith('/'): path = path[1:] # Remove leading /
+        if self.is_windows:
+            path = path.replace('/', '\\')
+        try:
+            full_path = os.path.join(vol_folder, path)
+        except Exception:
+            log.error("Exception in BuildFullPath(), path was " + path_in_image)
+            log.exception("Exception details")
+        log.debug("req={} final={}".format(path_in_image, full_path))
+        return full_path
+
+class MountedIosInfo(MountedMacInfo):
+    def __init__(self, root_folder_path, output_params):
+        MountedMacInfo.__init__(self, root_folder_path, output_params)
+    
+    def GetUserAndGroupIDForFile(self, path):
+        raise NotImplementedError()
+
+    def GetUserAndGroupIDForFolder(self, path):
+        return NotImplementedError()
+
+    def _GetUserAndGroupID(self, path):
+        return NotImplementedError()
+
+    def _GetDarwinFoldersInfo(self):
+        '''Gets DARWIN_*_DIR paths, these do not exist on IOS'''
+        return NotImplementedError()
+    
+    def _GetUserInfo(self):
+        return NotImplementedError()
+
+    def _GetSystemInfo(self):
+        ''' Gets system version information'''
+        try:
+            log.debug("Trying to get system version from /System/Library/CoreServices/SystemVersion.plist")
+            f = self.OpenSmallFile('/System/Library/CoreServices/SystemVersion.plist')
+            if f != None:
+                try:
+                    plist = biplist.readPlist(f)
+                    self.os_version = plist.get('ProductVersion', '')
+                    self.os_build = plist.get('ProductBuildVersion', '')
+                    self.os_friendly_name = plist.get('ProductName', '')
+                    log.info ('iOS version detected is: {} ({}) Build={}'.format(self.os_friendly_name, self.os_version, self.os_build))
+                    return True
+                except (InvalidPlistException, NotBinaryPlistException) as ex:
+                    log.error ("Could not get ProductVersion from plist. Is it a valid xml plist? Error=" + str(ex))
+            else:
+                log.error("Could not open plist to get system version info!")
+        except:
+            log.exception("Unknown error from _GetSystemInfo()")
+        return False
+
 class SqliteWrapper:
     '''
     Wrapper class for sqlite operations
@@ -1401,10 +1627,10 @@ class SqliteWrapper:
         self.mac_info = mac_info
         self.sqlite3 = sqlite3
         self.db_file_path = ''
-        self.shm_file_path = ''
+        self.jrn_file_path = ''
         self.wal_file_path = ''
         self.db_file_path_temp = ''
-        self.shm_file_path_temp = ''
+        self.jrn_file_path_temp = ''
         self.wal_file_path_temp = ''
         self.db_temp_file = None
         self.shm_temp_file = None
@@ -1422,12 +1648,12 @@ class SqliteWrapper:
 
         # extract each file to temp folder
         self.db_file_path_temp = os.path.join(self.folder_temp_path, os.path.basename(self.db_file_path))
-        self.shm_file_path_temp = os.path.join(self.folder_temp_path, os.path.basename(self.shm_file_path))
+        self.jrn_file_path_temp = os.path.join(self.folder_temp_path, os.path.basename(self.jrn_file_path))
         self.wal_file_path_temp = os.path.join(self.folder_temp_path, os.path.basename(self.wal_file_path))
 
         self.db_temp_file = self.mac_info.ExtractFile(self.db_file_path, self.db_file_path_temp)
-        if self.mac_info.IsValidFilePath(self.shm_file_path):
-            self.shm_temp_file = self.mac_info.ExtractFile(self.shm_file_path, self.shm_file_path_temp)
+        if self.mac_info.IsValidFilePath(self.jrn_file_path):
+            self.shm_temp_file = self.mac_info.ExtractFile(self.jrn_file_path, self.jrn_file_path_temp)
         if self.mac_info.IsValidFilePath(self.wal_file_path):
             self.wal_temp_file = self.mac_info.ExtractFile(self.wal_file_path, self.wal_file_path_temp)
         return True
@@ -1437,7 +1663,7 @@ class SqliteWrapper:
             def hooked(path):
                 # Get 'database' variable
                 self.db_file_path = path
-                self.shm_file_path = path + "-shm"
+                self.jrn_file_path = path + "-journal"
                 self.wal_file_path = path + "-wal"
                 if self._ExtractFiles():
                     log.debug('Trying to extract and read db: ' + path)
