@@ -537,10 +537,13 @@ class ApfsFileSystemParser:
                         log.exception('Exception trying to read block {}'.format(entry.data.pointer))
                 else:
                     try:
+                        if entry.data.flags & 4: # ENCRYPTED FLAG
+                            pass # Need to decrypt entry first!!
+                        if entry.data.flags & 1: #OMAP_VAL_DELETED
+                            log.debug("Encountered deleted branch in block={}, Skipping".format(entry.data.paddr.value))
+                            continue
                         newblock = self.container.read_block(entry.data.paddr.value)
                         self.read_entries(entry.data.paddr.value, newblock)
-                        if entry.data.flags & 1: #OMAP_VAL_DELETED
-                            log.warning("Block values are deleted? ,block={}".format(entry.data.paddr.value))
                     except (ValueError, EOFError, OSError):
                         log.exception('Exception trying to read block {}'.format(entry.data.paddr.value))
         elif block.header.subtype == 0:
@@ -1565,7 +1568,10 @@ class ApfsFile():
 
     def read(self, size_to_read=None):
         self._check_closed()
-        avail_to_read = self.file_size - self._pointer
+        if self.meta.is_symlink:
+            avail_to_read = len(self.meta.attributes['com.apple.fs.symlink'].data) - self._pointer
+        else:
+            avail_to_read = self.file_size - self._pointer
         if avail_to_read <= 0: # at or beyond the end of file
             return b''
         if (size_to_read is None) or (size_to_read > avail_to_read):
@@ -1588,7 +1594,7 @@ class ApfsFile():
                     self._buffer = data
 
         if self.meta.is_symlink: # if symlink, return symlink  path as data
-            data += self.meta.attributes['com.apple.fs.symlink'].data[0:size_to_read]
+            data += self.meta.attributes['com.apple.fs.symlink'].data[self._pointer : self._pointer + size_to_read]
 
         else:
             new_data_fetched = self._GetSomeDataFromExtents(self.extents, self.meta.logical_size, self._pointer, size_to_read)
